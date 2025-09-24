@@ -2,8 +2,10 @@ const express = require("express");
 const http = require("http");
 const socketIo = require("socket.io");
 const cors = require("cors");
+
 const app = express();
 app.use(cors());
+
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
@@ -11,27 +13,39 @@ const io = socketIo(server, {
     methods: ["GET", "POST"]
   }
 });
+
 const activeUsers = new Map();
+
 io.on("connection", (socket) => {
   console.log("New client connected:", socket.id);
+
   socket.on("joinChat", ({ chatId, userType, userId }) => {
-    const rooms = Array.from(socket.rooms);
-    if (!rooms.includes(chatId)) {
-      socket.join(chatId);
-      activeUsers.set(socket.id, { chatId, userType, userId });
-      console.log(`Socket ${socket.id} (${userType}) joined chat ${chatId}`);
-      const onlineUsers = Array.from(activeUsers.values()).filter(
-        (user) => user.userType === "user"
-      );
-      io.emit("onlineUsers", onlineUsers);
-    } else {
-      console.log(`Socket ${socket.id} is already in chat ${chatId}`);
-    }
+    socket.join(chatId);
+    activeUsers.set(socket.id, { chatId, userType, userId });
+    console.log(`Socket ${socket.id} (${userType}) joined chat ${chatId}`);
+
+    // Notify all clients about online users
+    const onlineUsers = Array.from(activeUsers.values()).filter(
+      (user) => user.userType === "user"
+    );
+    io.emit("onlineUsers", onlineUsers);
   });
+
   socket.on("sendMessage", (message) => {
     console.log("Emitting message to room", message.chatId, "with ID", message.id);
+
+    // Send to the specific chat room (customer + admin)
     io.to(message.chatId).emit("receiveMessage", message);
+
+    // Also send to all admins (if needed)
+    const admins = Array.from(activeUsers.values()).filter(
+      (user) => user.userType === "admin"
+    );
+    admins.forEach(admin => {
+      io.to(admin.chatId).emit("receiveMessage", message);
+    });
   });
+
   socket.on("disconnect", () => {
     const user = activeUsers.get(socket.id);
     if (user) {
@@ -44,6 +58,7 @@ io.on("connection", (socket) => {
     }
   });
 });
+
 const PORT = process.env.PORT || 4000;
 server.listen(PORT, () => {
   console.log(`WebSocket server running on port ${PORT}`);

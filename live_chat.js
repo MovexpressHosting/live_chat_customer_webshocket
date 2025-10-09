@@ -4,11 +4,9 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 const os = require('os');
 const mysql = require('mysql2/promise');
-
 const app = express();
 app.use(cors());
 app.use(express.json());
-
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {
@@ -18,7 +16,6 @@ const io = new Server(httpServer, {
   pingTimeout: 60000,
   pingInterval: 25000
 });
-
 // MySQL Configuration
 const dbConfig = {
   host: "srv657.hstgr.io",
@@ -29,14 +26,11 @@ const dbConfig = {
   connectionLimit: 10,
   queueLimit: 0
 };
-
 // Create MySQL connection pool
 const pool = mysql.createPool(dbConfig);
-
 // Track online status and users
 let adminOnline = false;
-const users = {}; // { socketId: { type: 'user'|'admin', name: string, customerId?: string, chatId?: string } }
-
+const users = {};
 // Create tables if not exists
 async function initializeDatabase() {
   const connection = await pool.getConnection();
@@ -81,13 +75,10 @@ async function initializeDatabase() {
     connection.release();
   }
 }
-
 initializeDatabase();
-
 // Socket.IO connection
 io.on('connection', (socket) => {
   console.log('New client connected:', socket.id);
-
   // Register user (customer or admin)
   socket.on('register', (userType, userName, customerId) => {
     users[socket.id] = {
@@ -97,17 +88,14 @@ io.on('connection', (socket) => {
       socketId: socket.id
     };
     console.log(`User registered as ${userType}:`, socket.id, users[socket.id].name);
-    
     socket.join(userType);
     if (userType === 'admin') {
       adminOnline = true;
       io.emit('adminStatus', true);
       console.log('Admin came online');
     }
-    
     updateOnlineUsers();
   });
-
   // Join a specific chat room
   socket.on('joinChat', ({ chatId, userType, userId }) => {
     socket.join(chatId);
@@ -119,10 +107,8 @@ io.on('connection', (socket) => {
       socketId: socket.id
     };
     console.log(`User ${socket.id} joined chat ${chatId} as ${userType}`);
-    
     updateOnlineUsers();
   });
-
   // Handle sending messages
   socket.on('sendMessage', async (message) => {
     console.log('Message received:', {
@@ -132,28 +118,23 @@ io.on('connection', (socket) => {
       text: message.text?.substring(0, 50) + (message.text?.length > 50 ? '...' : ''),
       hasMedia: message.media?.length > 0
     });
-
     const { id, senderId, receiverId, chatId, text, media, sender_type } = message;
-    
     if (!chatId) {
       console.error('No chatId provided in message:', message);
       return;
     }
-
     const messageWithTimestamp = {
       message_id: id,
       sender_id: senderId,
-      receiver_id: receiverId,
+      receiver_id: receiverId || 'admin',
       chat_id: chatId,
       text: text || '',
       timestamp: new Date().toISOString(),
       sender_type: sender_type,
     };
-
     let connection;
     try {
       connection = await pool.getConnection();
-
       // Insert into customer_messages table
       await connection.query(
         'INSERT IGNORE INTO customer_messages (message_id, sender_id, receiver_id, chat_id, text, timestamp, sender_type) VALUES (?, ?, ?, ?, ?, ?, ?)',
@@ -167,7 +148,6 @@ io.on('connection', (socket) => {
           messageWithTimestamp.sender_type,
         ]
       );
-
       // If media is present, insert into customer_media_uploads
       if (media && media.length > 0) {
         for (const item of media) {
@@ -192,13 +172,12 @@ io.on('connection', (socket) => {
     } finally {
       if (connection) connection.release();
     }
-
     // Route message to the correct chat room with acknowledgment
     try {
       if (chatId) {
-        // Emit to all sockets in the chat room
         io.to(chatId).emit('receiveMessage', {
           ...message,
+          receiverId: messageWithTimestamp.receiver_id,
           timestamp: messageWithTimestamp.timestamp,
           _delivered: true
         });
@@ -206,6 +185,7 @@ io.on('connection', (socket) => {
       } else if (receiverId) {
         io.to(receiverId).emit('receiveMessage', {
           ...message,
+          receiverId: messageWithTimestamp.receiver_id,
           timestamp: messageWithTimestamp.timestamp,
           _delivered: true
         });
@@ -213,6 +193,7 @@ io.on('connection', (socket) => {
       } else {
         io.emit('receiveMessage', {
           ...message,
+          receiverId: messageWithTimestamp.receiver_id,
           timestamp: messageWithTimestamp.timestamp,
           _delivered: true
         });
@@ -222,22 +203,18 @@ io.on('connection', (socket) => {
       console.error('Error emitting message:', emitError);
     }
   });
-
   // Handle message delivery confirmation
   socket.on('messageDelivered', (messageId) => {
     console.log(`Message ${messageId} confirmed delivered`);
   });
-
   // Handle typing indicators
   socket.on('typing', ({ chatId, isTyping }) => {
     socket.to(chatId).emit('typing', { userId: socket.id, isTyping });
   });
-
   // Handle disconnection
   socket.on('disconnect', (reason) => {
     console.log('Client disconnected:', socket.id, 'Reason:', reason);
     const disconnectedUser = users[socket.id];
-    
     if (disconnectedUser) {
       if (disconnectedUser.type === 'admin') {
         adminOnline = false;
@@ -246,17 +223,14 @@ io.on('connection', (socket) => {
       }
       delete users[socket.id];
     }
-    
     updateOnlineUsers();
     console.log(`User disconnected. Remaining users:`, Object.keys(users).length);
   });
-
   // Handle connection errors
   socket.on('connect_error', (error) => {
     console.error('Socket connection error:', error);
   });
 });
-
 // Update online users and emit to all clients
 function updateOnlineUsers() {
   const onlineUsers = Object.values(users).map(user => ({
@@ -266,20 +240,16 @@ function updateOnlineUsers() {
     customerId: user.customerId,
     chatId: user.chatId
   }));
-  
   io.emit('onlineUsers', onlineUsers);
   console.log('Online users updated:', onlineUsers.length);
 }
-
 // API endpoint to fetch old messages with associated media
 app.get('/api/messages/:chatId', async (req, res) => {
   const { chatId } = req.params;
-  
   try {
     console.log(`Fetching messages for chat: ${chatId}`);
-    
     const [messageRows] = await pool.query(
-      `SELECT 
+      `SELECT
         cm.*,
         CASE
           WHEN cm.sender_type = 'admin' OR cm.sender_type = 'support' THEN 'support'
@@ -290,7 +260,6 @@ app.get('/api/messages/:chatId', async (req, res) => {
        ORDER BY cm.timestamp ASC`,
       [chatId]
     );
-    
     const messagesWithMedia = await Promise.all(
       messageRows.map(async (message) => {
         const [mediaRows] = await pool.query(
@@ -303,7 +272,6 @@ app.get('/api/messages/:chatId', async (req, res) => {
         };
       })
     );
-    
     console.log(`Found ${messagesWithMedia.length} messages for chat ${chatId}`);
     res.json(messagesWithMedia);
   } catch (error) {
@@ -311,17 +279,15 @@ app.get('/api/messages/:chatId', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch messages' });
   }
 });
-
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
+  res.json({
+    status: 'OK',
     timestamp: new Date().toISOString(),
     onlineUsers: Object.keys(users).length,
     adminOnline: adminOnline
   });
 });
-
 // Helper function to get local IP address
 function getLocalIpAddress() {
   const interfaces = os.networkInterfaces();
@@ -336,7 +302,6 @@ function getLocalIpAddress() {
   }
   return '0.0.0.0';
 }
-
 // Start server
 const PORT = process.env.PORT || 3001;
 httpServer.listen(PORT, () => {

@@ -48,6 +48,7 @@ async function initializeDatabase() {
         INDEX (message_id)
       )
     `);
+
     // Customer media table
     await connection.query(`
       CREATE TABLE IF NOT EXISTS customer_media_uploads (
@@ -64,6 +65,7 @@ async function initializeDatabase() {
         INDEX (customer_id)
       )
     `);
+
     // Customer sessions table
     await connection.query(`
       CREATE TABLE IF NOT EXISTS customer_sessions (
@@ -78,6 +80,7 @@ async function initializeDatabase() {
         INDEX (is_online)
       )
     `);
+
     console.log("Customer chat database initialized");
   } catch (error) {
     console.error("Database initialization error:", error);
@@ -92,19 +95,16 @@ initializeDatabase();
 const customers = new Map(); // customerId -> socketId
 let adminSocket = null;
 
+// Socket.IO connection
 io.on('connection', (socket) => {
   console.log('New connection:', socket.id);
 
   // Customer registration
   socket.on('registerCustomer', async (data) => {
     const { customerId, customerName, socketId } = data;
-
     customers.set(customerId, socket.id);
-
     try {
       const connection = await pool.getConnection();
-
-      // Update or insert customer session
       await connection.query(`
         INSERT INTO customer_sessions (customer_id, customer_name, socket_id, is_online, last_activity)
         VALUES (?, ?, ?, true, NOW())
@@ -123,8 +123,6 @@ io.on('connection', (socket) => {
           isOnline: true
         });
       }
-
-      // Send updated customer list to admin
       broadcastCustomerList();
     } catch (error) {
       console.error('Error registering customer:', error);
@@ -135,21 +133,15 @@ io.on('connection', (socket) => {
   socket.on('registerAdmin', () => {
     adminSocket = socket.id;
     console.log('Admin registered:', socket.id);
-
-    // Send current customer list to admin
     broadcastCustomerList();
   });
 
   // Customer sends message
   socket.on('sendCustomerMessage', async (message) => {
     console.log('Customer message received:', message);
-
     const { id, text, customerId, senderName, media } = message;
-
     try {
       const connection = await pool.getConnection();
-
-      // Save message to database
       await connection.query(`
         INSERT INTO customer_messages (message_id, customer_id, customer_name, text, sender_type, timestamp)
         VALUES (?, ?, ?, ?, 'customer', NOW())
@@ -181,13 +173,9 @@ io.on('connection', (socket) => {
   // Admin sends message
   socket.on('sendAdminMessage', async (message) => {
     console.log('Admin message received:', message);
-
     const { id, text, customerId, media } = message;
-
     try {
       const connection = await pool.getConnection();
-
-      // Save message to database
       await connection.query(`
         INSERT INTO customer_messages (message_id, customer_id, customer_name, text, sender_type, timestamp)
         VALUES (?, ?, 'Support', ?, 'support', NOW())
@@ -220,8 +208,6 @@ io.on('connection', (socket) => {
   // Handle disconnection
   socket.on('disconnect', async () => {
     console.log('Client disconnected:', socket.id);
-
-    // Check if it was admin
     if (socket.id === adminSocket) {
       adminSocket = null;
       console.log('Admin disconnected');
@@ -232,7 +218,6 @@ io.on('connection', (socket) => {
     for (const [customerId, socketId] of customers.entries()) {
       if (socketId === socket.id) {
         customers.delete(customerId);
-
         try {
           const connection = await pool.getConnection();
           await connection.query(
@@ -240,8 +225,6 @@ io.on('connection', (socket) => {
             [customerId]
           );
           connection.release();
-
-          // Notify admin
           if (adminSocket) {
             io.to(adminSocket).emit('customerStatus', {
               customerId,
@@ -289,35 +272,38 @@ async function broadcastCustomerList() {
 app.get('/api/customer-messages/:customerId', async (req, res) => {
   try {
     const connection = await pool.getConnection();
-
     const [messages] = await connection.query(`
       SELECT
-        cm.*,
-        (SELECT JSON_ARRAYAGG(
-          JSON_OBJECT(
-            'file_name', cmu.file_name,
-            'file_url', cmu.file_url,
-            'media_type', cmu.media_type,
-            'file_size', cmu.file_size,
-            'mime_type', cmu.mime_type
-          )
-        ) FROM customer_media_uploads cmu
-        WHERE cmu.message_id = cm.message_id) as media
+        cm.id,
+        cm.message_id,
+        cm.customer_id,
+        cm.customer_name,
+        cm.text,
+        cm.sender_type,
+        cm.timestamp
       FROM customer_messages cm
       WHERE cm.customer_id = ?
       ORDER BY cm.timestamp ASC
     `, [req.params.customerId]);
-    connection.release();
 
-    // Parse media JSON
-    const messagesWithMedia = messages.map(msg => ({
-      ...msg,
-      media: msg.media ? JSON.parse(msg.media) : []
+    // Fetch media for each message
+    const messagesWithMedia = await Promise.all(messages.map(async (msg) => {
+      const [media] = await connection.query(`
+        SELECT file_name, file_url, media_type, file_size, mime_type
+        FROM customer_media_uploads
+        WHERE message_id = ?
+      `, [msg.message_id]);
+      return {
+        ...msg,
+        media: media || []
+      };
     }));
+
+    connection.release();
     res.json(messagesWithMedia);
   } catch (error) {
     console.error('Error fetching customer messages:', error);
-    res.status(500).json({ error: 'Failed to fetch messages' });
+    res.status(500).json({ error: 'Failed to fetch messages', details: error.message });
   }
 });
 
@@ -325,7 +311,6 @@ app.get('/api/customer-messages/:customerId', async (req, res) => {
 app.get('/api/customers', async (req, res) => {
   try {
     const connection = await pool.getConnection();
-
     const [customers] = await connection.query(`
       SELECT
         cs.customer_id as id,
@@ -348,7 +333,20 @@ app.get('/api/customers', async (req, res) => {
     res.json(customers);
   } catch (error) {
     console.error('Error fetching customers:', error);
-    res.status(500).json({ error: 'Failed to fetch customers' });
+    res.status(500).json({ error: 'Failed to fetch customers', details: error.message });
+  }
+});
+
+// Test database connection
+app.get('/api/test-db', async (req, res) => {
+  try {
+    const connection = await pool.getConnection();
+    const [rows] = await connection.query('SELECT 1');
+    connection.release();
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error('Database connection test failed:', error);
+    res.status(500).json({ error: 'Database connection failed', details: error.message });
   }
 });
 

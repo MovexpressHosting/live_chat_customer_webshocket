@@ -4,6 +4,7 @@
   "description": "",
   "main": "live_chat.js",
   "scripts": {
+    "start": "node live_chat.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -13,6 +14,7 @@
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^5.1.0",
+    "mysql2": "^3.9.2",
     "socket.io": "^4.8.1"
   }
 }

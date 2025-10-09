@@ -21,30 +21,29 @@ io.on("connection", (socket) => {
 
   socket.on("joinChat", ({ chatId, userType, userId }) => {
     socket.join(chatId);
-    activeUsers.set(socket.id, { chatId, userType, userId, socketId: socket.id });
+    activeUsers.set(socket.id, { chatId, userType, userId });
     console.log(`Socket ${socket.id} (${userType}) joined chat ${chatId}`);
 
     // Notify all clients about online users
-    const onlineUsers = Array.from(activeUsers.values());
+    const onlineUsers = Array.from(activeUsers.values()).filter(
+      (user) => user.userType === "user"
+    );
     io.emit("onlineUsers", onlineUsers);
   });
 
   socket.on("sendMessage", (message) => {
-    console.log("Message received:", message);
     console.log("Emitting message to room", message.chatId, "with ID", message.id);
 
     // Send to the specific chat room (customer + admin)
     io.to(message.chatId).emit("receiveMessage", message);
 
-    // Also send to all admins who are connected to any chat
+    // Also send to all admins (if needed)
     const admins = Array.from(activeUsers.values()).filter(
       (user) => user.userType === "admin"
     );
     admins.forEach(admin => {
-      socket.to(admin.socketId).emit("receiveMessage", message);
+      io.to(admin.chatId).emit("receiveMessage", message);
     });
-
-    console.log(`Message broadcasted to chat ${message.chatId}`);
   });
 
   socket.on("disconnect", () => {
@@ -52,7 +51,9 @@ io.on("connection", (socket) => {
     if (user) {
       console.log(`Socket ${socket.id} (${user.userType}) left chat ${user.chatId}`);
       activeUsers.delete(socket.id);
-      const onlineUsers = Array.from(activeUsers.values());
+      const onlineUsers = Array.from(activeUsers.values()).filter(
+        (user) => user.userType === "user"
+      );
       io.emit("onlineUsers", onlineUsers);
     }
   });

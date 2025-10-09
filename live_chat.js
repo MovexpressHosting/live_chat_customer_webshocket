@@ -48,7 +48,6 @@ async function initializeDatabase() {
         INDEX (message_id)
       )
     `);
-
     // Customer media table
     await connection.query(`
       CREATE TABLE IF NOT EXISTS customer_media_uploads (
@@ -65,7 +64,6 @@ async function initializeDatabase() {
         INDEX (customer_id)
       )
     `);
-
     // Customer sessions table
     await connection.query(`
       CREATE TABLE IF NOT EXISTS customer_sessions (
@@ -80,7 +78,6 @@ async function initializeDatabase() {
         INDEX (is_online)
       )
     `);
-
     console.log("Customer chat database initialized");
   } catch (error) {
     console.error("Database initialization error:", error);
@@ -101,22 +98,21 @@ io.on('connection', (socket) => {
   // Customer registration
   socket.on('registerCustomer', async (data) => {
     const { customerId, customerName, socketId } = data;
-    
+
     customers.set(customerId, socket.id);
-    
+
     try {
       const connection = await pool.getConnection();
-      
+
       // Update or insert customer session
       await connection.query(`
-        INSERT INTO customer_sessions (customer_id, customer_name, socket_id, is_online, last_activity) 
-        VALUES (?, ?, ?, true, NOW()) 
-        ON DUPLICATE KEY UPDATE 
-        socket_id = VALUES(socket_id), 
-        is_online = VALUES(is_online), 
+        INSERT INTO customer_sessions (customer_id, customer_name, socket_id, is_online, last_activity)
+        VALUES (?, ?, ?, true, NOW())
+        ON DUPLICATE KEY UPDATE
+        socket_id = VALUES(socket_id),
+        is_online = VALUES(is_online),
         last_activity = VALUES(last_activity)
       `, [customerId, customerName, socket.id]);
-
       connection.release();
 
       // Notify admin about new customer
@@ -130,7 +126,6 @@ io.on('connection', (socket) => {
 
       // Send updated customer list to admin
       broadcastCustomerList();
-
     } catch (error) {
       console.error('Error registering customer:', error);
     }
@@ -140,7 +135,7 @@ io.on('connection', (socket) => {
   socket.on('registerAdmin', () => {
     adminSocket = socket.id;
     console.log('Admin registered:', socket.id);
-    
+
     // Send current customer list to admin
     broadcastCustomerList();
   });
@@ -148,12 +143,12 @@ io.on('connection', (socket) => {
   // Customer sends message
   socket.on('sendCustomerMessage', async (message) => {
     console.log('Customer message received:', message);
-    
+
     const { id, text, customerId, senderName, media } = message;
-    
+
     try {
       const connection = await pool.getConnection();
-      
+
       // Save message to database
       await connection.query(`
         INSERT INTO customer_messages (message_id, customer_id, customer_name, text, sender_type, timestamp)
@@ -169,7 +164,6 @@ io.on('connection', (socket) => {
           `, [id, customerId, item.file_name, item.file_url, item.media_type, item.file_size, item.mime_type]);
         }
       }
-
       connection.release();
 
       // Forward message to admin
@@ -179,7 +173,6 @@ io.on('connection', (socket) => {
           timestamp: new Date().toISOString()
         });
       }
-
     } catch (error) {
       console.error('Error saving customer message:', error);
     }
@@ -188,12 +181,12 @@ io.on('connection', (socket) => {
   // Admin sends message
   socket.on('sendAdminMessage', async (message) => {
     console.log('Admin message received:', message);
-    
+
     const { id, text, customerId, media } = message;
-    
+
     try {
       const connection = await pool.getConnection();
-      
+
       // Save message to database
       await connection.query(`
         INSERT INTO customer_messages (message_id, customer_id, customer_name, text, sender_type, timestamp)
@@ -209,7 +202,6 @@ io.on('connection', (socket) => {
           `, [id, customerId, item.file_name, item.file_url, item.media_type, item.file_size, item.mime_type]);
         }
       }
-
       connection.release();
 
       // Forward message to customer
@@ -220,7 +212,6 @@ io.on('connection', (socket) => {
           timestamp: new Date().toISOString()
         });
       }
-
     } catch (error) {
       console.error('Error saving admin message:', error);
     }
@@ -241,7 +232,7 @@ io.on('connection', (socket) => {
     for (const [customerId, socketId] of customers.entries()) {
       if (socketId === socket.id) {
         customers.delete(customerId);
-        
+
         try {
           const connection = await pool.getConnection();
           await connection.query(
@@ -263,7 +254,6 @@ io.on('connection', (socket) => {
         break;
       }
     }
-
     broadcastCustomerList();
   });
 });
@@ -271,27 +261,24 @@ io.on('connection', (socket) => {
 // Broadcast customer list to admin
 async function broadcastCustomerList() {
   if (!adminSocket) return;
-
   try {
     const connection = await pool.getConnection();
     const [rows] = await connection.query(`
-      SELECT 
+      SELECT
         cs.customer_id as id,
         cs.customer_name as name,
         cs.is_online as isOnline,
         cs.last_activity as lastActivity,
-        (SELECT COUNT(*) FROM customer_messages cm 
-         WHERE cm.customer_id = cs.customer_id 
+        (SELECT COUNT(*) FROM customer_messages cm
+         WHERE cm.customer_id = cs.customer_id
          AND cm.sender_type = 'customer'
-         AND cm.timestamp > COALESCE((SELECT MAX(timestamp) FROM customer_messages 
+         AND cm.timestamp > COALESCE((SELECT MAX(timestamp) FROM customer_messages
                                     WHERE customer_id = cs.customer_id AND sender_type = 'support'), '2000-01-01')
         ) as unreadCount
       FROM customer_sessions cs
       ORDER BY cs.last_activity DESC
     `);
-
     connection.release();
-
     io.to(adminSocket).emit('customerList', rows);
   } catch (error) {
     console.error('Error fetching customer list:', error);
@@ -302,9 +289,9 @@ async function broadcastCustomerList() {
 app.get('/api/customer-messages/:customerId', async (req, res) => {
   try {
     const connection = await pool.getConnection();
-    
+
     const [messages] = await connection.query(`
-      SELECT 
+      SELECT
         cm.*,
         (SELECT JSON_ARRAYAGG(
           JSON_OBJECT(
@@ -314,13 +301,12 @@ app.get('/api/customer-messages/:customerId', async (req, res) => {
             'file_size', cmu.file_size,
             'mime_type', cmu.mime_type
           )
-        ) FROM customer_media_uploads cmu 
+        ) FROM customer_media_uploads cmu
         WHERE cmu.message_id = cm.message_id) as media
       FROM customer_messages cm
       WHERE cm.customer_id = ?
       ORDER BY cm.timestamp ASC
     `, [req.params.customerId]);
-
     connection.release();
 
     // Parse media JSON
@@ -328,7 +314,6 @@ app.get('/api/customer-messages/:customerId', async (req, res) => {
       ...msg,
       media: msg.media ? JSON.parse(msg.media) : []
     }));
-
     res.json(messagesWithMedia);
   } catch (error) {
     console.error('Error fetching customer messages:', error);
@@ -340,26 +325,25 @@ app.get('/api/customer-messages/:customerId', async (req, res) => {
 app.get('/api/customers', async (req, res) => {
   try {
     const connection = await pool.getConnection();
-    
+
     const [customers] = await connection.query(`
-      SELECT 
+      SELECT
         cs.customer_id as id,
         cs.customer_name as name,
         cs.is_online as isOnline,
         cs.last_activity as lastActivity,
-        (SELECT text FROM customer_messages 
-         WHERE customer_id = cs.customer_id 
+        (SELECT text FROM customer_messages
+         WHERE customer_id = cs.customer_id
          ORDER BY timestamp DESC LIMIT 1) as lastMessage,
-        (SELECT COUNT(*) FROM customer_messages 
-         WHERE customer_id = cs.customer_id 
+        (SELECT COUNT(*) FROM customer_messages
+         WHERE customer_id = cs.customer_id
          AND sender_type = 'customer'
-         AND timestamp > COALESCE((SELECT MAX(timestamp) FROM customer_messages 
+         AND timestamp > COALESCE((SELECT MAX(timestamp) FROM customer_messages
                                 WHERE customer_id = cs.customer_id AND sender_type = 'support'), '2000-01-01')
         ) as unreadCount
       FROM customer_sessions cs
       ORDER BY cs.last_activity DESC
     `);
-
     connection.release();
     res.json(customers);
   } catch (error) {

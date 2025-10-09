@@ -21,10 +21,9 @@ io.on("connection", (socket) => {
 
   socket.on("joinChat", ({ chatId, userType, userId }) => {
     socket.join(chatId);
-    activeUsers.set(socket.id, { chatId, userType, userId });
+    activeUsers.set(socket.id, { chatId, userType, userId, socketId: socket.id });
     console.log(`Socket ${socket.id} (${userType}) joined chat ${chatId}`);
 
-    // Notify all clients about online users
     const onlineUsers = Array.from(activeUsers.values()).filter(
       (user) => user.userType === "user"
     );
@@ -32,18 +31,36 @@ io.on("connection", (socket) => {
   });
 
   socket.on("sendMessage", (message) => {
-    console.log("Emitting message to room", message.chatId, "with ID", message.id);
-
-    // Send to the specific chat room (customer + admin)
-    io.to(message.chatId).emit("receiveMessage", message);
-
-    // Also send to all admins (if needed)
-    const admins = Array.from(activeUsers.values()).filter(
-      (user) => user.userType === "admin"
-    );
-    admins.forEach(admin => {
-      io.to(admin.chatId).emit("receiveMessage", message);
-    });
+    console.log("Received message:", message);
+    
+    if (message.sender_type === "support" || message.sender === "support") {
+      // Admin message - send to the specific customer
+      const targetChatId = message.chatId || message.driverId;
+      if (targetChatId) {
+        console.log(`Broadcasting admin message to chat room: ${targetChatId}`);
+        io.to(targetChatId).emit("receiveMessage", message);
+        
+        // Also send to all admins in the same chat
+        const adminsInChat = Array.from(activeUsers.values()).filter(
+          (user) => user.userType === "admin" && user.chatId === targetChatId
+        );
+        adminsInChat.forEach(admin => {
+          io.to(admin.socketId).emit("receiveMessage", message);
+        });
+      }
+    } else {
+      // Customer/User message - send to the specific chat room and all admins
+      console.log(`Broadcasting user message to chat room: ${message.chatId}`);
+      io.to(message.chatId).emit("receiveMessage", message);
+      
+      // Send to all admins
+      const admins = Array.from(activeUsers.values()).filter(
+        (user) => user.userType === "admin"
+      );
+      admins.forEach(admin => {
+        io.to(admin.socketId).emit("receiveMessage", message);
+      });
+    }
   });
 
   socket.on("disconnect", () => {

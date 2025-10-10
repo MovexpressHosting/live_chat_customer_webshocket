@@ -94,6 +94,7 @@ initializeDatabase();
 // Track connected users
 const customers = new Map(); // customerId -> socketId
 let adminSocket = null;
+let isAdminOnline = false;
 
 // Socket.IO connection
 io.on('connection', (socket) => {
@@ -123,6 +124,10 @@ io.on('connection', (socket) => {
           isOnline: true
         });
       }
+
+      // Notify customer about admin status
+      socket.emit('adminStatus', isAdminOnline);
+
       broadcastCustomerList();
     } catch (error) {
       console.error('Error registering customer:', error);
@@ -132,8 +137,26 @@ io.on('connection', (socket) => {
   // Admin registration
   socket.on('registerAdmin', () => {
     adminSocket = socket.id;
+    isAdminOnline = true;
     console.log('Admin registered:', socket.id);
+    
+    // Notify all customers that admin is online
+    customers.forEach((socketId, customerId) => {
+      io.to(socketId).emit('adminStatus', true);
+    });
+    
     broadcastCustomerList();
+  });
+
+  // Admin online status
+  socket.on('adminOnline', (data) => {
+    isAdminOnline = data.isOnline;
+    console.log('Admin online status:', isAdminOnline);
+    
+    // Notify all customers about admin status
+    customers.forEach((socketId, customerId) => {
+      io.to(socketId).emit('adminStatus', isAdminOnline);
+    });
   });
 
   // Customer sends message
@@ -208,9 +231,17 @@ io.on('connection', (socket) => {
   // Handle disconnection
   socket.on('disconnect', async () => {
     console.log('Client disconnected:', socket.id);
+    
     if (socket.id === adminSocket) {
       adminSocket = null;
+      isAdminOnline = false;
       console.log('Admin disconnected');
+      
+      // Notify all customers that admin is offline
+      customers.forEach((socketId, customerId) => {
+        io.to(socketId).emit('adminStatus', false);
+      });
+      
       return;
     }
 

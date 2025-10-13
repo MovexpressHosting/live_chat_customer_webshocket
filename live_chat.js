@@ -95,6 +95,7 @@ initializeDatabase();
 const customers = new Map(); // customerId -> socketId
 let adminSocket = null;
 let isAdminOnline = false;
+let adminName = "Support"; // Default admin name
 
 // Socket.IO connection
 io.on('connection', (socket) => {
@@ -125,8 +126,11 @@ io.on('connection', (socket) => {
         });
       }
 
-      // Notify customer about admin status
-      socket.emit('adminStatus', isAdminOnline);
+      // Notify customer about admin status and name
+      socket.emit('adminStatus', {
+        isOnline: isAdminOnline,
+        adminName: adminName
+      });
 
       broadcastCustomerList();
     } catch (error) {
@@ -135,14 +139,18 @@ io.on('connection', (socket) => {
   });
 
   // Admin registration
-  socket.on('registerAdmin', () => {
+  socket.on('registerAdmin', (data) => {
     adminSocket = socket.id;
     isAdminOnline = true;
-    console.log('Admin registered:', socket.id);
+    adminName = data?.adminName || "Support";
+    console.log('Admin registered:', socket.id, 'Name:', adminName);
     
-    // Notify all customers that admin is online
+    // Notify all customers that admin is online with name
     customers.forEach((socketId, customerId) => {
-      io.to(socketId).emit('adminStatus', true);
+      io.to(socketId).emit('adminStatus', {
+        isOnline: true,
+        adminName: adminName
+      });
     });
     
     broadcastCustomerList();
@@ -151,11 +159,15 @@ io.on('connection', (socket) => {
   // Admin online status
   socket.on('adminOnline', (data) => {
     isAdminOnline = data.isOnline;
-    console.log('Admin online status:', isAdminOnline);
+    adminName = data?.adminName || adminName;
+    console.log('Admin online status:', isAdminOnline, 'Name:', adminName);
     
-    // Notify all customers about admin status
+    // Notify all customers about admin status with name
     customers.forEach((socketId, customerId) => {
-      io.to(socketId).emit('adminStatus', isAdminOnline);
+      io.to(socketId).emit('adminStatus', {
+        isOnline: isAdminOnline,
+        adminName: adminName
+      });
     });
   });
 
@@ -201,8 +213,8 @@ io.on('connection', (socket) => {
       const connection = await pool.getConnection();
       await connection.query(`
         INSERT INTO customer_messages (message_id, customer_id, customer_name, text, sender_type, timestamp)
-        VALUES (?, ?, 'Support', ?, 'support', NOW())
-      `, [id, customerId, text]);
+        VALUES (?, ?, ?, ?, 'support', NOW())
+      `, [id, customerId, adminName, text]);
 
       // Save media if any
       if (media && media.length > 0) {
@@ -220,7 +232,8 @@ io.on('connection', (socket) => {
       if (customerSocketId) {
         io.to(customerSocketId).emit('receiveMessage', {
           ...message,
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          senderName: adminName
         });
       }
     } catch (error) {
@@ -239,7 +252,10 @@ io.on('connection', (socket) => {
       
       // Notify all customers that admin is offline
       customers.forEach((socketId, customerId) => {
-        io.to(socketId).emit('adminStatus', false);
+        io.to(socketId).emit('adminStatus', {
+          isOnline: false,
+          adminName: adminName
+        });
       });
       
       return;

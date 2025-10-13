@@ -143,9 +143,10 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('registerAdmin', async (data) => {
+  // Fixed registerAdmin event handler
+  socket.on('registerAdmin', async (data = {}) => {
     adminSocket = socket.id;
-    adminName = data.adminName || "Support";
+    adminName = data.adminName || "Support"; // Fixed: added default empty object
     
     try {
       const connection = await pool.getConnection();
@@ -175,9 +176,10 @@ io.on('connection', (socket) => {
     broadcastCustomerList();
   });
 
-  socket.on('adminOnline', (data) => {
+  // Fixed adminOnline event handler
+  socket.on('adminOnline', (data = {}) => {
     adminSocket = data.isOnline ? socket.id : null;
-    adminName = data.adminName || "Support";
+    adminName = data.adminName || "Support"; // Fixed: added default empty object
     console.log('Admin online status:', data.isOnline, 'Name:', adminName);
     
     customers.forEach((socketId, customerId) => {

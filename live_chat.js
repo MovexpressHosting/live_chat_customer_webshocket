@@ -250,7 +250,7 @@ io.on('connection', (socket) => {
           ...message,
           timestamp: new Date().toISOString(),
           adminName: adminName || "Support",
-          senderName: adminName || "Support" // Ensure senderName is included
+          senderName: adminName || "Support"
         });
         console.log('Message sent to customer:', customerId, 'via socket:', customerSocketId);
       } else {

@@ -130,6 +130,7 @@ io.on('connection', (socket) => {
           isOnline: true
         });
         
+        // Send admin info to customer immediately when they register
         socket.emit('adminInfo', {
           adminName: adminName
         });
@@ -143,10 +144,9 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Fixed registerAdmin event handler
   socket.on('registerAdmin', async (data = {}) => {
     adminSocket = socket.id;
-    adminName = data.adminName || "Support"; // Fixed: added default empty object
+    adminName = data.adminName || "Support";
     
     try {
       const connection = await pool.getConnection();
@@ -166,6 +166,7 @@ io.on('connection', (socket) => {
     
     console.log('Admin registered:', socket.id, 'Name:', adminName);
     
+    // Broadcast admin info to all connected customers
     customers.forEach((socketId, customerId) => {
       io.to(socketId).emit('adminStatus', true);
       io.to(socketId).emit('adminInfo', {
@@ -176,10 +177,9 @@ io.on('connection', (socket) => {
     broadcastCustomerList();
   });
 
-  // Fixed adminOnline event handler
   socket.on('adminOnline', (data = {}) => {
     adminSocket = data.isOnline ? socket.id : null;
-    adminName = data.adminName || "Support"; // Fixed: added default empty object
+    adminName = data.adminName || "Support";
     console.log('Admin online status:', data.isOnline, 'Name:', adminName);
     
     customers.forEach((socketId, customerId) => {
@@ -226,6 +226,7 @@ io.on('connection', (socket) => {
   socket.on('sendAdminMessage', async (message) => {
     console.log('Admin message received:', message);
     const { id, text, customerId, media, adminName } = message;
+    
     try {
       const connection = await pool.getConnection();
       await connection.query(`
@@ -248,8 +249,12 @@ io.on('connection', (socket) => {
         io.to(customerSocketId).emit('receiveMessage', {
           ...message,
           timestamp: new Date().toISOString(),
-          adminName: adminName || "Support"
+          adminName: adminName || "Support",
+          senderName: adminName || "Support" // Ensure senderName is included
         });
+        console.log('Message sent to customer:', customerId, 'via socket:', customerSocketId);
+      } else {
+        console.log('Customer not connected:', customerId);
       }
     } catch (error) {
       console.error('Error saving admin message:', error);

@@ -74,12 +74,10 @@ async function initializeDatabase() {
         customer_name VARCHAR(255) NOT NULL,
         socket_id VARCHAR(100),
         is_online BOOLEAN DEFAULT false,
-        chat_terminated BOOLEAN DEFAULT false,
         last_activity DATETIME NOT NULL,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         INDEX (customer_id),
-        INDEX (is_online),
-        INDEX (chat_terminated)
+        INDEX (is_online)
       )
     `);
 
@@ -106,36 +104,16 @@ io.on('connection', (socket) => {
   // Customer registration
   socket.on('registerCustomer', async (data) => {
     const { customerId, customerName, socketId } = data;
-    
-    // Check if chat is terminated for this customer
-    try {
-      const connection = await pool.getConnection();
-      const [rows] = await connection.query(
-        'SELECT chat_terminated FROM customer_sessions WHERE customer_id = ?',
-        [customerId]
-      );
-      connection.release();
-
-      if (rows.length > 0 && rows[0].chat_terminated) {
-        // Chat is terminated, don't register the customer
-        socket.emit('chatTerminated');
-        return;
-      }
-    } catch (error) {
-      console.error('Error checking chat termination status:', error);
-    }
-
     customers.set(customerId, socket.id);
     try {
       const connection = await pool.getConnection();
       await connection.query(`
-        INSERT INTO customer_sessions (customer_id, customer_name, socket_id, is_online, last_activity, chat_terminated)
-        VALUES (?, ?, ?, true, NOW(), false)
+        INSERT INTO customer_sessions (customer_id, customer_name, socket_id, is_online, last_activity)
+        VALUES (?, ?, ?, true, NOW())
         ON DUPLICATE KEY UPDATE
         socket_id = VALUES(socket_id),
         is_online = VALUES(is_online),
-        last_activity = VALUES(last_activity),
-        chat_terminated = false
+        last_activity = VALUES(last_activity)
       `, [customerId, customerName, socket.id]);
       connection.release();
 
@@ -263,31 +241,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Handle chat termination from admin
-  socket.on('terminateCustomerChat', async (data) => {
-    const { customerId } = data;
-    try {
-      const connection = await pool.getConnection();
-      await connection.query(
-        'UPDATE customer_sessions SET chat_terminated = 1 WHERE customer_id = ?',
-        [customerId]
-      );
-      connection.release();
-
-      // Notify customer
-      const customerSocketId = customers.get(customerId);
-      if (customerSocketId) {
-        io.to(customerSocketId).emit('chatTerminatedByAdmin');
-      }
-
-      // Remove customer from active connections
-      customers.delete(customerId);
-      broadcastCustomerList();
-    } catch (error) {
-      console.error('Error terminating customer chat:', error);
-    }
-  });
-
   // Handle disconnection
   socket.on('disconnect', async () => {
     console.log('Client disconnected:', socket.id);
@@ -345,7 +298,6 @@ async function broadcastCustomerList() {
         cs.customer_id as id,
         cs.customer_name as name,
         cs.is_online as isOnline,
-        cs.chat_terminated as chatTerminated,
         cs.last_activity as lastActivity,
         (SELECT COUNT(*) FROM customer_messages cm
          WHERE cm.customer_id = cs.customer_id
@@ -354,7 +306,6 @@ async function broadcastCustomerList() {
                                     WHERE customer_id = cs.customer_id AND sender_type = 'support'), '2000-01-01')
         ) as unreadCount
       FROM customer_sessions cs
-      WHERE cs.chat_terminated = false
       ORDER BY cs.last_activity DESC
     `);
     connection.release();
@@ -412,7 +363,6 @@ app.get('/api/customers', async (req, res) => {
         cs.customer_id as id,
         cs.customer_name as name,
         cs.is_online as isOnline,
-        cs.chat_terminated as chatTerminated,
         cs.last_activity as lastActivity,
         (SELECT text FROM customer_messages
          WHERE customer_id = cs.customer_id
@@ -424,7 +374,6 @@ app.get('/api/customers', async (req, res) => {
                                 WHERE customer_id = cs.customer_id AND sender_type = 'support'), '2000-01-01')
         ) as unreadCount
       FROM customer_sessions cs
-      WHERE cs.chat_terminated = false
       ORDER BY cs.last_activity DESC
     `);
     connection.release();

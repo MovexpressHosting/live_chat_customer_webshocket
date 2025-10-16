@@ -74,7 +74,7 @@ async function initializeDatabase() {
         customer_name VARCHAR(255) NOT NULL,
         socket_id VARCHAR(100),
         is_online BOOLEAN DEFAULT false,
-        terminated BOOLEAN DEFAULT false,
+        chat_terminated BOOLEAN DEFAULT false,
         last_activity DATETIME NOT NULL,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         INDEX (customer_id),
@@ -111,7 +111,7 @@ io.on('connection', (socket) => {
     try {
       const connection = await pool.getConnection();
       const [rows] = await connection.query(
-        'SELECT terminated FROM customer_sessions WHERE customer_id = ?',
+        'SELECT chat_terminated FROM customer_sessions WHERE customer_id = ?',
         [customerId]
       );
       connection.release();
@@ -135,7 +135,7 @@ io.on('connection', (socket) => {
         socket_id = VALUES(socket_id),
         is_online = VALUES(is_online),
         last_activity = VALUES(last_activity),
-        terminated = false
+        chat_terminated = false
       `, [customerId, customerName, socket.id]);
       connection.release();
 
@@ -269,7 +269,7 @@ io.on('connection', (socket) => {
     try {
       const connection = await pool.getConnection();
       await connection.query(
-        'UPDATE customer_sessions SET terminated = true WHERE customer_id = ?',
+        'UPDATE customer_sessions SET chat_terminated = true WHERE customer_id = ?',
         [customerId]
       );
       connection.release();
@@ -349,7 +349,7 @@ async function broadcastCustomerList() {
         cs.customer_id as id,
         cs.customer_name as name,
         cs.is_online as isOnline,
-        cs.terminated as terminated,
+        cs.chat_terminated as chat_terminated,
         cs.last_activity as lastActivity,
         (SELECT COUNT(*) FROM customer_messages cm
          WHERE cm.customer_id = cs.customer_id
@@ -358,7 +358,7 @@ async function broadcastCustomerList() {
                                     WHERE customer_id = cs.customer_id AND sender_type = 'support'), '2000-01-01')
         ) as unreadCount
       FROM customer_sessions cs
-      WHERE cs.terminated = false
+      WHERE cs.chat_terminated = false
       ORDER BY cs.last_activity DESC
     `);
     connection.release();
@@ -456,3 +456,4 @@ const PORT = process.env.PORT || 3001;
 httpServer.listen(PORT, () => {
   console.log(`Customer Chat WebSocket server running on port ${PORT}`);
 });
+

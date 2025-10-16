@@ -74,10 +74,13 @@ async function initializeDatabase() {
         customer_name VARCHAR(255) NOT NULL,
         socket_id VARCHAR(100),
         is_online BOOLEAN DEFAULT false,
+        chat_terminated BOOLEAN DEFAULT false,
+        who_terminated ENUM('customer', 'support') DEFAULT NULL,
         last_activity DATETIME NOT NULL,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         INDEX (customer_id),
-        INDEX (is_online)
+        INDEX (is_online),
+        INDEX (chat_terminated)
       )
     `);
 
@@ -101,12 +104,30 @@ let adminName = "Support"; // Default admin name
 io.on('connection', (socket) => {
   console.log('New connection:', socket.id);
 
-  // Customer registration
+  // Customer registration with chat termination check
   socket.on('registerCustomer', async (data) => {
     const { customerId, customerName, socketId } = data;
-    customers.set(customerId, socket.id);
+    
     try {
       const connection = await pool.getConnection();
+      
+      // Check if chat is terminated
+      const [sessionRows] = await connection.query(
+        'SELECT chat_terminated FROM customer_sessions WHERE customer_id = ?',
+        [customerId]
+      );
+      
+      // If chat is terminated, don't allow registration and notify customer
+      if (sessionRows.length > 0 && sessionRows[0].chat_terminated) {
+        socket.emit('chatTerminated', {
+          terminated: true,
+          message: 'This chat session has been terminated. Please start a new chat.'
+        });
+        connection.release();
+        return;
+      }
+      
+      customers.set(customerId, socket.id);
       await connection.query(`
         INSERT INTO customer_sessions (customer_id, customer_name, socket_id, is_online, last_activity)
         VALUES (?, ?, ?, true, NOW())
@@ -175,8 +196,25 @@ io.on('connection', (socket) => {
   socket.on('sendCustomerMessage', async (message) => {
     console.log('Customer message received:', message);
     const { id, text, customerId, senderName, media } = message;
+    
     try {
       const connection = await pool.getConnection();
+      
+      // Check if chat is terminated before allowing message
+      const [sessionRows] = await connection.query(
+        'SELECT chat_terminated FROM customer_sessions WHERE customer_id = ?',
+        [customerId]
+      );
+      
+      if (sessionRows.length > 0 && sessionRows[0].chat_terminated) {
+        socket.emit('chatTerminated', {
+          terminated: true,
+          message: 'This chat session has been terminated. You cannot send messages.'
+        });
+        connection.release();
+        return;
+      }
+      
       await connection.query(`
         INSERT INTO customer_messages (message_id, customer_id, customer_name, text, sender_type, timestamp)
         VALUES (?, ?, ?, ?, 'customer', NOW())
@@ -241,6 +279,91 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Customer terminates chat
+  socket.on('terminateChat', async (data) => {
+    const { customerId } = data;
+    console.log('Customer terminating chat:', customerId);
+    
+    try {
+      const connection = await pool.getConnection();
+      await connection.query(`
+        UPDATE customer_sessions 
+        SET chat_terminated = true, who_terminated = 'customer' 
+        WHERE customer_id = ?
+      `, [customerId]);
+      connection.release();
+
+      // Remove customer from active connections
+      customers.delete(customerId);
+
+      // Notify customer that chat is terminated
+      socket.emit('chatTerminated', {
+        terminated: true,
+        message: 'Chat terminated successfully. Starting new chat session...'
+      });
+
+      // Notify admin
+      if (adminSocket) {
+        io.to(adminSocket).emit('chatTerminatedByCustomer', {
+          customerId,
+          message: 'Customer has terminated the chat session'
+        });
+        
+        // Update customer list for admin
+        broadcastCustomerList();
+      }
+
+    } catch (error) {
+      console.error('Error terminating chat:', error);
+      socket.emit('terminateChatError', {
+        error: 'Failed to terminate chat'
+      });
+    }
+  });
+
+  // Admin terminates chat
+  socket.on('adminTerminateChat', async (data) => {
+    const { customerId } = data;
+    console.log('Admin terminating chat for customer:', customerId);
+    
+    try {
+      const connection = await pool.getConnection();
+      await connection.query(`
+        UPDATE customer_sessions 
+        SET chat_terminated = true, who_terminated = 'support' 
+        WHERE customer_id = ?
+      `, [customerId]);
+      connection.release();
+
+      // Notify customer
+      const customerSocketId = customers.get(customerId);
+      if (customerSocketId) {
+        io.to(customerSocketId).emit('chatTerminated', {
+          terminated: true,
+          message: 'Support has terminated this chat session. Please start a new chat if you need further assistance.'
+        });
+        
+        // Remove customer from active connections
+        customers.delete(customerId);
+      }
+
+      // Notify admin
+      socket.emit('chatTerminationSuccess', {
+        customerId,
+        message: 'Chat terminated successfully'
+      });
+
+      // Update customer list
+      broadcastCustomerList();
+
+    } catch (error) {
+      console.error('Error terminating chat:', error);
+      socket.emit('terminateChatError', {
+        error: 'Failed to terminate chat'
+      });
+    }
+  });
+
   // Handle disconnection
   socket.on('disconnect', async () => {
     console.log('Client disconnected:', socket.id);
@@ -298,6 +421,8 @@ async function broadcastCustomerList() {
         cs.customer_id as id,
         cs.customer_name as name,
         cs.is_online as isOnline,
+        cs.chat_terminated as chatTerminated,
+        cs.who_terminated as whoTerminated,
         cs.last_activity as lastActivity,
         (SELECT COUNT(*) FROM customer_messages cm
          WHERE cm.customer_id = cs.customer_id
@@ -354,6 +479,63 @@ app.get('/api/customer-messages/:customerId', async (req, res) => {
   }
 });
 
+// API endpoint to check if chat is terminated
+app.get('/api/check-chat-terminated/:customerId', async (req, res) => {
+  try {
+    const connection = await pool.getConnection();
+    const [rows] = await connection.query(
+      'SELECT chat_terminated, who_terminated FROM customer_sessions WHERE customer_id = ?',
+      [req.params.customerId]
+    );
+    connection.release();
+
+    if (rows.length > 0) {
+      res.json({
+        terminated: rows[0].chat_terminated,
+        whoTerminated: rows[0].who_terminated
+      });
+    } else {
+      res.json({ terminated: false });
+    }
+  } catch (error) {
+    console.error('Error checking chat termination:', error);
+    res.status(500).json({ error: 'Failed to check chat status', details: error.message });
+  }
+});
+
+// API endpoint to terminate chat (for external calls)
+app.post('/api/terminate-chat', async (req, res) => {
+  try {
+    const { customerId } = req.body;
+    
+    if (!customerId) {
+      return res.status(400).json({ success: false, message: 'Customer ID is required' });
+    }
+
+    const connection = await pool.getConnection();
+    const result = await connection.query(`
+      UPDATE customer_sessions 
+      SET chat_terminated = true, who_terminated = 'customer' 
+      WHERE customer_id = ?
+    `, [customerId]);
+    connection.release();
+
+    // Notify admin if online
+    if (adminSocket) {
+      io.to(adminSocket).emit('chatTerminatedByCustomer', {
+        customerId,
+        message: 'Customer has terminated the chat session'
+      });
+      broadcastCustomerList();
+    }
+
+    res.json({ success: true, message: 'Chat terminated successfully' });
+  } catch (error) {
+    console.error('Error terminating chat:', error);
+    res.status(500).json({ success: false, message: 'Failed to terminate chat', details: error.message });
+  }
+});
+
 // API endpoint to get all customers with last message
 app.get('/api/customers', async (req, res) => {
   try {
@@ -363,6 +545,8 @@ app.get('/api/customers', async (req, res) => {
         cs.customer_id as id,
         cs.customer_name as name,
         cs.is_online as isOnline,
+        cs.chat_terminated as chatTerminated,
+        cs.who_terminated as whoTerminated,
         cs.last_activity as lastActivity,
         (SELECT text FROM customer_messages
          WHERE customer_id = cs.customer_id

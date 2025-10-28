@@ -29,23 +29,17 @@ const dbConfig = {
 
 const pool = mysql.createPool(dbConfig);
 
-// Track connected users
-const customers = new Map(); // customerId -> socketId
-const admins = new Map(); // socketId -> adminData (multiple admins support)
-let isAdminOnline = false;
-
 // Initialize database tables
 async function initializeDatabase() {
   const connection = await pool.getConnection();
   try {
-    // Customer messages table with admin_name field
+    // Customer messages table
     await connection.query(`
       CREATE TABLE IF NOT EXISTS customer_messages (
         id INT AUTO_INCREMENT PRIMARY KEY,
         message_id VARCHAR(100) NOT NULL,
         customer_id VARCHAR(100) NOT NULL,
         customer_name VARCHAR(255) NOT NULL,
-        admin_name VARCHAR(255) DEFAULT NULL,
         text TEXT NOT NULL,
         sender_type ENUM('customer', 'support') NOT NULL,
         timestamp DATETIME NOT NULL,
@@ -100,6 +94,12 @@ async function initializeDatabase() {
 
 initializeDatabase();
 
+// Track connected users
+const customers = new Map(); // customerId -> socketId
+let adminSocket = null;
+let isAdminOnline = false;
+let adminName = "Support"; // Default admin name
+
 // Socket.IO connection
 io.on('connection', (socket) => {
   console.log('New connection:', socket.id);
@@ -138,27 +138,20 @@ io.on('connection', (socket) => {
       `, [customerId, customerName, socket.id]);
       connection.release();
 
-      // Notify all admins about new customer
-      broadcastToAdmins('customerStatus', {
-        customerId,
-        customerName,
-        isOnline: true
-      });
-
-      // Notify customer about admin status
-      const adminList = Array.from(admins.values());
-      if (adminList.length > 0) {
-        const firstAdmin = adminList[0]; // Or implement logic to choose which admin to show
-        socket.emit('adminStatus', {
-          isOnline: true,
-          adminName: firstAdmin.adminName || "Support"
-        });
-      } else {
-        socket.emit('adminStatus', {
-          isOnline: false,
-          adminName: "Support"
+      // Notify admin about new customer
+      if (adminSocket) {
+        io.to(adminSocket).emit('customerStatus', {
+          customerId,
+          customerName,
+          isOnline: true
         });
       }
+
+      // Notify customer about admin status and name
+      socket.emit('adminStatus', {
+        isOnline: isAdminOnline,
+        adminName: adminName
+      });
 
       broadcastCustomerList();
     } catch (error) {
@@ -166,28 +159,37 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Admin registration (multiple admins support)
+  // Admin registration
   socket.on('registerAdmin', (data) => {
-    const adminData = {
-      socketId: socket.id,
-      adminName: data?.adminName || "Support",
-      ...data
-    };
+    adminSocket = socket.id;
+    isAdminOnline = true;
+    adminName = data?.adminName || "Support";
+    console.log('Admin registered:', socket.id, 'Name:', adminName);
     
-    admins.set(socket.id, adminData);
-    isAdminOnline = admins.size > 0;
-    
-    console.log('Admin registered:', socket.id, 'Name:', adminData.adminName);
-    
-    // Notify all customers that an admin is online
+    // Notify all customers that admin is online with name
     customers.forEach((socketId, customerId) => {
       io.to(socketId).emit('adminStatus', {
         isOnline: true,
-        adminName: adminData.adminName
+        adminName: adminName
       });
     });
     
     broadcastCustomerList();
+  });
+
+  // Admin online status
+  socket.on('adminOnline', (data) => {
+    isAdminOnline = data.isOnline;
+    adminName = data?.adminName || adminName;
+    console.log('Admin online status:', isAdminOnline, 'Name:', adminName);
+    
+    // Notify all customers about admin status with name
+    customers.forEach((socketId, customerId) => {
+      io.to(socketId).emit('adminStatus', {
+        isOnline: isAdminOnline,
+        adminName: adminName
+      });
+    });
   });
 
   // Customer sends message
@@ -229,11 +231,13 @@ io.on('connection', (socket) => {
       }
       connection.release();
 
-      // Forward message to all admins
-      broadcastToAdmins('receiveCustomerMessage', {
-        ...message,
-        timestamp: new Date().toISOString()
-      });
+      // Forward message to admin
+      if (adminSocket) {
+        io.to(adminSocket).emit('receiveCustomerMessage', {
+          ...message,
+          timestamp: new Date().toISOString()
+        });
+      }
     } catch (error) {
       console.error('Error saving customer message:', error);
     }
@@ -242,20 +246,13 @@ io.on('connection', (socket) => {
   // Admin sends message
   socket.on('sendAdminMessage', async (message) => {
     console.log('Admin message received:', message);
-    const { id, text, customerId, senderName, media } = message;
-    
-    // Get the admin data who sent the message
-    const adminData = admins.get(socket.id);
-    const adminNameToUse = senderName || (adminData ? adminData.adminName : "Support");
-    
+    const { id, text, customerId, media } = message;
     try {
       const connection = await pool.getConnection();
-      
-      // Save message with admin name
       await connection.query(`
-        INSERT INTO customer_messages (message_id, customer_id, customer_name, admin_name, text, sender_type, timestamp)
+        INSERT INTO customer_messages (message_id, customer_id, customer_name, text, sender_type, timestamp)
         VALUES (?, ?, ?, ?, 'support', NOW())
-      `, [id, customerId, adminNameToUse, adminNameToUse, text]);
+      `, [id, customerId, adminName, text]);
 
       // Save media if any
       if (media && media.length > 0) {
@@ -268,13 +265,13 @@ io.on('connection', (socket) => {
       }
       connection.release();
 
-      // Forward message to customer with admin name
+      // Forward message to customer
       const customerSocketId = customers.get(customerId);
       if (customerSocketId) {
         io.to(customerSocketId).emit('receiveMessage', {
           ...message,
           timestamp: new Date().toISOString(),
-          senderName: adminNameToUse
+          senderName: adminName
         });
       }
     } catch (error) {
@@ -305,14 +302,16 @@ io.on('connection', (socket) => {
         message: 'Chat terminated successfully. Starting new chat session...'
       });
 
-      // Notify all admins
-      broadcastToAdmins('chatTerminatedByCustomer', {
-        customerId,
-        message: 'Customer has terminated the chat session'
-      });
-      
-      // Update customer list for admins
-      broadcastCustomerList();
+      // Notify admin
+      if (adminSocket) {
+        io.to(adminSocket).emit('chatTerminatedByCustomer', {
+          customerId,
+          message: 'Customer has terminated the chat session'
+        });
+        
+        // Update customer list for admin
+        broadcastCustomerList();
+      }
 
     } catch (error) {
       console.error('Error terminating chat:', error);
@@ -369,21 +368,19 @@ io.on('connection', (socket) => {
   socket.on('disconnect', async () => {
     console.log('Client disconnected:', socket.id);
     
-    // Check if it was an admin
-    if (admins.has(socket.id)) {
-      admins.delete(socket.id);
-      isAdminOnline = admins.size > 0;
-      console.log('Admin disconnected:', socket.id);
+    if (socket.id === adminSocket) {
+      adminSocket = null;
+      isAdminOnline = false;
+      console.log('Admin disconnected');
       
-      if (!isAdminOnline) {
-        // Notify all customers that all admins are offline
-        customers.forEach((socketId, customerId) => {
-          io.to(socketId).emit('adminStatus', {
-            isOnline: false,
-            adminName: "Support"
-          });
+      // Notify all customers that admin is offline
+      customers.forEach((socketId, customerId) => {
+        io.to(socketId).emit('adminStatus', {
+          isOnline: false,
+          adminName: adminName
         });
-      }
+      });
+      
       return;
     }
 
@@ -398,12 +395,12 @@ io.on('connection', (socket) => {
             [customerId]
           );
           connection.release();
-          
-          // Notify all admins about customer going offline
-          broadcastToAdmins('customerStatus', {
-            customerId,
-            isOnline: false
-          });
+          if (adminSocket) {
+            io.to(adminSocket).emit('customerStatus', {
+              customerId,
+              isOnline: false
+            });
+          }
         } catch (error) {
           console.error('Error updating customer status:', error);
         }
@@ -414,17 +411,9 @@ io.on('connection', (socket) => {
   });
 });
 
-// Helper function to broadcast to all admins
-function broadcastToAdmins(event, data) {
-  admins.forEach((adminData, socketId) => {
-    io.to(socketId).emit(event, data);
-  });
-}
-
-// Broadcast customer list to all admins
+// Broadcast customer list to admin
 async function broadcastCustomerList() {
-  if (admins.size === 0) return;
-  
+  if (!adminSocket) return;
   try {
     const connection = await pool.getConnection();
     const [rows] = await connection.query(`
@@ -445,15 +434,13 @@ async function broadcastCustomerList() {
       ORDER BY cs.last_activity DESC
     `);
     connection.release();
-    
-    // Send to all admins
-    broadcastToAdmins('customerList', rows);
+    io.to(adminSocket).emit('customerList', rows);
   } catch (error) {
     console.error('Error fetching customer list:', error);
   }
 }
 
-// API endpoint to get customer messages with admin names
+// API endpoint to get customer messages
 app.get('/api/customer-messages/:customerId', async (req, res) => {
   try {
     const connection = await pool.getConnection();
@@ -462,10 +449,7 @@ app.get('/api/customer-messages/:customerId', async (req, res) => {
         cm.id,
         cm.message_id,
         cm.customer_id,
-        CASE 
-          WHEN cm.sender_type = 'customer' THEN cm.customer_name 
-          ELSE COALESCE(cm.admin_name, 'Support')
-        END as senderName,
+        cm.customer_name,
         cm.text,
         cm.sender_type,
         cm.timestamp
@@ -536,13 +520,14 @@ app.post('/api/terminate-chat', async (req, res) => {
     `, [customerId]);
     connection.release();
 
-    // Notify admins if online
-    broadcastToAdmins('chatTerminatedByCustomer', {
-      customerId,
-      message: 'Customer has terminated the chat session'
-    });
-    
-    broadcastCustomerList();
+    // Notify admin if online
+    if (adminSocket) {
+      io.to(adminSocket).emit('chatTerminatedByCustomer', {
+        customerId,
+        message: 'Customer has terminated the chat session'
+      });
+      broadcastCustomerList();
+    }
 
     res.json({ success: true, message: 'Chat terminated successfully' });
   } catch (error) {

@@ -16,7 +16,6 @@ const io = new Server(httpServer, {
   }
 });
 
-// MySQL Configuration
 const dbConfig = {
   host: "srv657.hstgr.io",
   user: "u442108067_mydb",
@@ -29,11 +28,9 @@ const dbConfig = {
 
 const pool = mysql.createPool(dbConfig);
 
-// Initialize database tables
 async function initializeDatabase() {
   const connection = await pool.getConnection();
   try {
-    // Customer messages table
     await connection.query(`
       CREATE TABLE IF NOT EXISTS customer_messages (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -50,7 +47,6 @@ async function initializeDatabase() {
       )
     `);
 
-    // Customer media table
     await connection.query(`
       CREATE TABLE IF NOT EXISTS customer_media_uploads (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -67,7 +63,6 @@ async function initializeDatabase() {
       )
     `);
 
-    // Customer sessions table
     await connection.query(`
       CREATE TABLE IF NOT EXISTS customer_sessions (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -95,30 +90,24 @@ async function initializeDatabase() {
 
 initializeDatabase();
 
-// Track connected users
-const customers = new Map(); // customerId -> socketId
-let adminSocket = null;
-let isAdminOnline = false;
-let adminName = "Support"; // Default admin name
+const customers = new Map();
+const adminSockets = new Map();
+let adminName = "Support";
 
-// Socket.IO connection
 io.on('connection', (socket) => {
   console.log('New connection:', socket.id);
 
-  // Customer registration with chat termination check
   socket.on('registerCustomer', async (data) => {
     const { customerId, customerName, socketId } = data;
     
     try {
       const connection = await pool.getConnection();
       
-      // Check if chat is terminated
       const [sessionRows] = await connection.query(
         'SELECT chat_terminated FROM customer_sessions WHERE customer_id = ?',
         [customerId]
       );
       
-      // If chat is terminated, don't allow registration and notify customer
       if (sessionRows.length > 0 && sessionRows[0].chat_terminated) {
         socket.emit('chatTerminated', {
           terminated: true,
@@ -139,18 +128,16 @@ io.on('connection', (socket) => {
       `, [customerId, customerName, socket.id]);
       connection.release();
 
-      // Notify admin about new customer
-      if (adminSocket) {
-        io.to(adminSocket).emit('customerStatus', {
+      adminSockets.forEach((adminData, adminSocketId) => {
+        io.to(adminSocketId).emit('customerStatus', {
           customerId,
           customerName,
           isOnline: true
         });
-      }
+      });
 
-      // Notify customer about admin status and name
       socket.emit('adminStatus', {
-        isOnline: isAdminOnline,
+        isOnline: adminSockets.size > 0,
         adminName: adminName
       });
 
@@ -160,14 +147,14 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Admin registration
   socket.on('registerAdmin', (data) => {
-    adminSocket = socket.id;
-    isAdminOnline = true;
+    adminSockets.set(socket.id, {
+      adminName: data?.adminName || "Support",
+      socketId: socket.id
+    });
     adminName = data?.adminName || "Support";
-    console.log('Admin registered:', socket.id, 'Name:', adminName);
+    console.log('Admin registered:', socket.id, 'Total admins:', adminSockets.size);
     
-    // Notify all customers that admin is online with name
     customers.forEach((socketId, customerId) => {
       io.to(socketId).emit('adminStatus', {
         isOnline: true,
@@ -178,22 +165,24 @@ io.on('connection', (socket) => {
     broadcastCustomerList();
   });
 
-  // Admin online status
   socket.on('adminOnline', (data) => {
-    isAdminOnline = data.isOnline;
-    adminName = data?.adminName || adminName;
-    console.log('Admin online status:', isAdminOnline, 'Name:', adminName);
+    if (adminSockets.has(socket.id)) {
+      const adminData = adminSockets.get(socket.id);
+      adminData.adminName = data?.adminName || adminData.adminName;
+      adminSockets.set(socket.id, adminData);
+    }
     
-    // Notify all customers about admin status with name
+    adminName = data?.adminName || adminName;
+    console.log('Admin online status update:', adminSockets.size, 'admins online');
+    
     customers.forEach((socketId, customerId) => {
       io.to(socketId).emit('adminStatus', {
-        isOnline: isAdminOnline,
+        isOnline: adminSockets.size > 0,
         adminName: adminName
       });
     });
   });
 
-  // Customer sends message
   socket.on('sendCustomerMessage', async (message) => {
     console.log('Customer message received:', message);
     const { id, text, customerId, senderName, media } = message;
@@ -201,7 +190,6 @@ io.on('connection', (socket) => {
     try {
       const connection = await pool.getConnection();
       
-      // Check if chat is terminated before allowing message
       const [sessionRows] = await connection.query(
         'SELECT chat_terminated FROM customer_sessions WHERE customer_id = ?',
         [customerId]
@@ -221,7 +209,6 @@ io.on('connection', (socket) => {
         VALUES (?, ?, ?, ?, 'customer', NOW())
       `, [id, customerId, senderName, text]);
 
-      // Save media if any
       if (media && media.length > 0) {
         for (const item of media) {
           await connection.query(`
@@ -232,30 +219,31 @@ io.on('connection', (socket) => {
       }
       connection.release();
 
-      // Forward message to admin
-      if (adminSocket) {
-        io.to(adminSocket).emit('receiveCustomerMessage', {
+      adminSockets.forEach((adminData, adminSocketId) => {
+        io.to(adminSocketId).emit('receiveCustomerMessage', {
           ...message,
           timestamp: new Date().toISOString()
         });
-      }
+      });
     } catch (error) {
       console.error('Error saving customer message:', error);
     }
   });
 
-  // Admin sends message
   socket.on('sendAdminMessage', async (message) => {
     console.log('Admin message received:', message);
     const { id, text, customerId, media } = message;
     try {
       const connection = await pool.getConnection();
+      
+      const adminData = adminSockets.get(socket.id);
+      const currentAdminName = adminData?.adminName || "Support";
+      
       await connection.query(`
         INSERT INTO customer_messages (message_id, customer_id, customer_name, text, sender_type, admin_name, timestamp)
         VALUES (?, ?, ?, ?, 'support', ?, NOW())
-      `, [id, customerId, adminName, text, adminName]);
+      `, [id, customerId, currentAdminName, text, currentAdminName]);
 
-      // Save media if any
       if (media && media.length > 0) {
         for (const item of media) {
           await connection.query(`
@@ -266,13 +254,12 @@ io.on('connection', (socket) => {
       }
       connection.release();
 
-      // Forward message to customer
       const customerSocketId = customers.get(customerId);
       if (customerSocketId) {
         io.to(customerSocketId).emit('receiveMessage', {
           ...message,
           timestamp: new Date().toISOString(),
-          senderName: adminName
+          senderName: currentAdminName
         });
       }
     } catch (error) {
@@ -280,7 +267,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Customer terminates chat
   socket.on('terminateChat', async (data) => {
     const { customerId } = data;
     console.log('Customer terminating chat:', customerId);
@@ -294,25 +280,21 @@ io.on('connection', (socket) => {
       `, [customerId]);
       connection.release();
 
-      // Remove customer from active connections
       customers.delete(customerId);
 
-      // Notify customer that chat is terminated
       socket.emit('chatTerminated', {
         terminated: true,
         message: 'Chat terminated successfully. Starting new chat session...'
       });
 
-      // Notify admin
-      if (adminSocket) {
-        io.to(adminSocket).emit('chatTerminatedByCustomer', {
+      adminSockets.forEach((adminData, adminSocketId) => {
+        io.to(adminSocketId).emit('chatTerminatedByCustomer', {
           customerId,
           message: 'Customer has terminated the chat session'
         });
-        
-        // Update customer list for admin
-        broadcastCustomerList();
-      }
+      });
+      
+      broadcastCustomerList();
 
     } catch (error) {
       console.error('Error terminating chat:', error);
@@ -322,7 +304,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Admin terminates chat
   socket.on('adminTerminateChat', async (data) => {
     const { customerId } = data;
     console.log('Admin terminating chat for customer:', customerId);
@@ -336,7 +317,6 @@ io.on('connection', (socket) => {
       `, [customerId]);
       connection.release();
 
-      // Notify customer
       const customerSocketId = customers.get(customerId);
       if (customerSocketId) {
         io.to(customerSocketId).emit('chatTerminated', {
@@ -344,17 +324,14 @@ io.on('connection', (socket) => {
           message: 'Support has terminated this chat session. Please start a new chat if you need further assistance.'
         });
         
-        // Remove customer from active connections
         customers.delete(customerId);
       }
 
-      // Notify admin
       socket.emit('chatTerminationSuccess', {
         customerId,
         message: 'Chat terminated successfully'
       });
 
-      // Update customer list
       broadcastCustomerList();
 
     } catch (error) {
@@ -365,19 +342,16 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Handle disconnection
   socket.on('disconnect', async () => {
     console.log('Client disconnected:', socket.id);
     
-    if (socket.id === adminSocket) {
-      adminSocket = null;
-      isAdminOnline = false;
-      console.log('Admin disconnected');
+    if (adminSockets.has(socket.id)) {
+      adminSockets.delete(socket.id);
+      console.log('Admin disconnected. Remaining admins:', adminSockets.size);
       
-      // Notify all customers that admin is offline
       customers.forEach((socketId, customerId) => {
         io.to(socketId).emit('adminStatus', {
-          isOnline: false,
+          isOnline: adminSockets.size > 0,
           adminName: adminName
         });
       });
@@ -385,7 +359,6 @@ io.on('connection', (socket) => {
       return;
     }
 
-    // Check if it was a customer
     for (const [customerId, socketId] of customers.entries()) {
       if (socketId === socket.id) {
         customers.delete(customerId);
@@ -396,12 +369,12 @@ io.on('connection', (socket) => {
             [customerId]
           );
           connection.release();
-          if (adminSocket) {
-            io.to(adminSocket).emit('customerStatus', {
+          adminSockets.forEach((adminData, adminSocketId) => {
+            io.to(adminSocketId).emit('customerStatus', {
               customerId,
               isOnline: false
             });
-          }
+          });
         } catch (error) {
           console.error('Error updating customer status:', error);
         }
@@ -412,9 +385,8 @@ io.on('connection', (socket) => {
   });
 });
 
-// Broadcast customer list to admin
 async function broadcastCustomerList() {
-  if (!adminSocket) return;
+  if (adminSockets.size === 0) return;
   try {
     const connection = await pool.getConnection();
     const [rows] = await connection.query(`
@@ -435,13 +407,14 @@ async function broadcastCustomerList() {
       ORDER BY cs.last_activity DESC
     `);
     connection.release();
-    io.to(adminSocket).emit('customerList', rows);
+    adminSockets.forEach((adminData, adminSocketId) => {
+      io.to(adminSocketId).emit('customerList', rows);
+    });
   } catch (error) {
     console.error('Error fetching customer list:', error);
   }
 }
 
-// API endpoint to get customer messages
 app.get('/api/customer-messages/:customerId', async (req, res) => {
   try {
     const connection = await pool.getConnection();
@@ -460,7 +433,6 @@ app.get('/api/customer-messages/:customerId', async (req, res) => {
       ORDER BY cm.timestamp ASC
     `, [req.params.customerId]);
 
-    // Fetch media for each message
     const messagesWithMedia = await Promise.all(messages.map(async (msg) => {
       const [media] = await connection.query(`
         SELECT file_name, file_url, media_type, file_size, mime_type
@@ -481,7 +453,6 @@ app.get('/api/customer-messages/:customerId', async (req, res) => {
   }
 });
 
-// API endpoint to check if chat is terminated
 app.get('/api/check-chat-terminated/:customerId', async (req, res) => {
   try {
     const connection = await pool.getConnection();
@@ -505,7 +476,6 @@ app.get('/api/check-chat-terminated/:customerId', async (req, res) => {
   }
 });
 
-// API endpoint to terminate chat (for external calls)
 app.post('/api/terminate-chat', async (req, res) => {
   try {
     const { customerId } = req.body;
@@ -522,14 +492,13 @@ app.post('/api/terminate-chat', async (req, res) => {
     `, [customerId]);
     connection.release();
 
-    // Notify admin if online
-    if (adminSocket) {
-      io.to(adminSocket).emit('chatTerminatedByCustomer', {
+    adminSockets.forEach((adminData, adminSocketId) => {
+      io.to(adminSocketId).emit('chatTerminatedByCustomer', {
         customerId,
         message: 'Customer has terminated the chat session'
       });
-      broadcastCustomerList();
-    }
+    });
+    broadcastCustomerList();
 
     res.json({ success: true, message: 'Chat terminated successfully' });
   } catch (error) {
@@ -538,7 +507,6 @@ app.post('/api/terminate-chat', async (req, res) => {
   }
 });
 
-// API endpoint to get all customers with last message
 app.get('/api/customers', async (req, res) => {
   try {
     const connection = await pool.getConnection();
@@ -570,7 +538,6 @@ app.get('/api/customers', async (req, res) => {
   }
 });
 
-// Test database connection
 app.get('/api/test-db', async (req, res) => {
   try {
     const connection = await pool.getConnection();

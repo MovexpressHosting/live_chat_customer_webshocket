@@ -42,6 +42,7 @@ async function initializeDatabase() {
         customer_name VARCHAR(255) NOT NULL,
         text TEXT NOT NULL,
         sender_type ENUM('customer', 'support') NOT NULL,
+        admin_name VARCHAR(255) DEFAULT NULL,
         timestamp DATETIME NOT NULL,
         INDEX (customer_id),
         INDEX (timestamp),
@@ -250,9 +251,9 @@ io.on('connection', (socket) => {
     try {
       const connection = await pool.getConnection();
       await connection.query(`
-        INSERT INTO customer_messages (message_id, customer_id, customer_name, text, sender_type, timestamp)
-        VALUES (?, ?, ?, ?, 'support', NOW())
-      `, [id, customerId, adminName, text]);
+        INSERT INTO customer_messages (message_id, customer_id, customer_name, text, sender_type, admin_name, timestamp)
+        VALUES (?, ?, ?, ?, 'support', ?, NOW())
+      `, [id, customerId, adminName, text, adminName]);
 
       // Save media if any
       if (media && media.length > 0) {
@@ -452,6 +453,7 @@ app.get('/api/customer-messages/:customerId', async (req, res) => {
         cm.customer_name,
         cm.text,
         cm.sender_type,
+        cm.admin_name,
         cm.timestamp
       FROM customer_messages cm
       WHERE cm.customer_id = ?

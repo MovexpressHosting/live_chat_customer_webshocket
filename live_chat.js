@@ -18,9 +18,9 @@ const io = new Server(httpServer, {
 
 const dbConfig = {
   host: "srv657.hstgr.io",
-  user: "u442108067_mydb",
-  password: "mOhe6ln0iP>",
-  database: "u442108067_mydb",
+ user: "u442108067_MoveExpress",
+  password: "@1ItH~?ztgV",
+  database: "u442108067_MoveExpress",
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0
@@ -554,3 +554,4 @@ const PORT = process.env.PORT || 3001;
 httpServer.listen(PORT, () => {
   console.log(`Customer Chat WebSocket server running on port ${PORT}`);
 });
+

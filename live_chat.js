@@ -31,6 +31,23 @@ const pool = mysql.createPool(dbConfig);
 async function initializeDatabase() {
   const connection = await pool.getConnection();
   try {
+    // Check if assigned_admin column exists, if not add it
+    const [columns] = await connection.query(`
+      SELECT COLUMN_NAME 
+      FROM INFORMATION_SCHEMA.COLUMNS 
+      WHERE TABLE_NAME = 'customer_sessions' 
+      AND COLUMN_NAME = 'assigned_admin'
+    `);
+    
+    if (columns.length === 0) {
+      await connection.query(`
+        ALTER TABLE customer_sessions 
+        ADD COLUMN assigned_admin VARCHAR(255) DEFAULT NULL,
+        ADD COLUMN assigned_admin_socket_id VARCHAR(100) DEFAULT NULL
+      `);
+      console.log("Added assigned_admin columns to customer_sessions table");
+    }
+    
     await connection.query(`
       CREATE TABLE IF NOT EXISTS customer_messages (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -274,7 +291,8 @@ io.on('connection', (socket) => {
       console.error('Error claiming chat:', error);
       socket.emit('chatClaimFailed', {
         customerId,
-        message: 'Failed to claim chat. Please try again.'
+        message: 'Failed to claim chat. Please try again.',
+        error: error.message
       });
     }
   });
@@ -419,6 +437,32 @@ io.on('connection', (socket) => {
         });
         connection.release();
         return;
+      }
+      
+      // If no admin is assigned, automatically assign this admin
+      if (!assignedAdmin) {
+        await connection.query(`
+          UPDATE customer_sessions 
+          SET assigned_admin = ?, assigned_admin_socket_id = ?
+          WHERE customer_id = ?
+        `, [currentAdminName, socket.id, customerId]);
+        
+        activeAdminAssignments.set(customerId, {
+          adminName: currentAdminName,
+          adminSocketId: socket.id,
+          adminSocket: socket
+        });
+        
+        // Notify customer
+        const customerSocketId = customers.get(customerId);
+        if (customerSocketId) {
+          io.to(customerSocketId).emit('adminAssigned', {
+            adminName: currentAdminName,
+            canSendMessages: true
+          });
+        }
+        
+        broadcastCustomerList();
       }
       
       await connection.query(`
@@ -637,6 +681,7 @@ async function broadcastCustomerList() {
   }
 }
 
+// API Routes
 app.get('/api/customer-messages/:customerId', async (req, res) => {
   try {
     const connection = await pool.getConnection();
@@ -698,6 +743,7 @@ app.get('/api/check-chat-terminated/:customerId', async (req, res) => {
   }
 });
 
+// NEW ROUTE: Check chat assignment
 app.get('/api/check-chat-assignment/:customerId', async (req, res) => {
   try {
     const connection = await pool.getConnection();
@@ -730,7 +776,7 @@ app.post('/api/terminate-chat', async (req, res) => {
     }
 
     const connection = await pool.getConnection();
-    const result = await connection.query(`
+    await connection.query(`
       UPDATE customer_sessions 
       SET chat_terminated = true, who_terminated = 'customer', assigned_admin = NULL, assigned_admin_socket_id = NULL 
       WHERE customer_id = ?
